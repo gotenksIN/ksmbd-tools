@@ -225,12 +225,20 @@ static int srvsvc_share_enum_all_return(struct ksmbd_rpc_pipe *pipe)
 	status = ndr_write_array_of_structs(pipe);
 	if (status == KSMBD_RPC_EBAD_DATA)
 		return status;
+	if (dce->si_req.level != 0 && dce->si_req.level != 1)
+		status = KSMBD_RPC_EINVALID_LEVEL;
 	/*
 	 * [out] DWORD* TotalEntries
 	 * [out, unique] DWORD* ResumeHandle
 	 */
 	if (ndr_write_int32(dce, pipe->num_processed))
 		return KSMBD_RPC_EBAD_DATA;
+
+	if (!dce->si_req.payload_handle.ref_id) {
+		if (ndr_write_int32(dce, 0))
+			return KSMBD_RPC_EBAD_DATA;
+		return status;
+	}
 
 	if (status == KSMBD_RPC_EMORE_DATA) {
 		dce->num_pointers++;
@@ -293,28 +301,32 @@ static int srvsvc_parse_share_info_req(struct ksmbd_dcerpc *dce,
 		return -EINVAL;
 
 	if (dce->req_hdr.opnum == SRVSVC_OPNUM_SHARE_ENUM_ALL) {
-		int ptr;
-		__u32 val;
+		__u32 container, entries, ptr, val;
 
 		/* Read union switch selector */
 		if (ndr_read_union_int32(dce, &val))
 			return -EINVAL;
 		hdr->level = val;
-		// read container pointer ref id
-		if (ndr_read_int32(dce, NULL))
+		/* Read the selected union arm's unique container pointer. */
+		if (ndr_read_int32(dce, &container))
 			return -EINVAL;
-		// read container array size
-		if (ndr_read_int32(dce, NULL))
-			return -EINVAL;
-		// read container array pointer
-		if (ndr_read_int32(dce, &ptr))
-			return -EINVAL;
-		// it should be null
-		if (ptr != 0x00) {
-			pr_err("SRVSVC: container array pointer is %x\n",
-				ptr);
-			return -EINVAL;
+		if (container) {
+			if (ndr_read_int32(dce, &entries))
+				return -EINVAL;
+			if (ndr_read_int32(dce, &ptr))
+				return -EINVAL;
+
+			if (ptr) {
+				if (entries) {
+					pr_err("SRVSVC: nonempty input share array is unsupported\n");
+					return -EINVAL;
+				}
+
+				if (ndr_read_int32(dce, &val) || val)
+					return -EINVAL;
+			}
 		}
+
 		if (ndr_read_int32(dce, &val))
 			return -EINVAL;
 		hdr->max_size = val;
